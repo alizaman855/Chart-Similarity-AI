@@ -82,33 +82,6 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.mount("/historical", StaticFiles(directory="historical"), name="historical")
 app.mount("/temp", StaticFiles(directory="temp"), name="temp")
 
-# WebSocket connection manager for GPT Vision progress
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast_progress(self, message: dict):
-        disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except:
-                disconnected.append(connection)
-        
-        for conn in disconnected:
-            if conn in self.active_connections:
-                self.active_connections.remove(conn)
-
-manager = ConnectionManager()
-
 # Store job status in memory (for both analysis types)
 jobs = {}
 
@@ -196,23 +169,6 @@ def format_analysis_text(analysis_text: str) -> str:
             formatted_paragraphs.append(para)
     
     return '\n'.join(formatted_paragraphs)
-
-async def send_gpt_progress_update(current: int, total: int, message: str, completed: int = None):
-    """Send progress updates for GPT Vision analysis"""
-    percentage = int((current / total) * 100) if total > 0 else 0
-    
-    logger.info(f"GPT Progress: {percentage}% | {current}/{total} | {message}")
-    
-    progress_data = {
-        "type": "progress",
-        "current": current,
-        "total": total,
-        "percentage": percentage,
-        "message": message,
-        "completed_comparisons": completed
-    }
-    
-    await manager.broadcast_progress(progress_data)
 
 def update_cv_progress(job_id, progress):
     """Update computer vision job progress"""
@@ -371,66 +327,113 @@ def run_computer_vision_analysis(job_id: str, file_path: str, output_dir: str, f
         jobs[job_id]["error"] = str(e)
         logger.error(f"Error processing computer vision job {job_id}: {str(e)}")
 
-# GPT Vision Routes
-@app.post("/api/gpt-compare", response_model=ComparisonResponse)
-async def gpt_compare_charts(file: UploadFile = File(...)):
-    """GPT Vision chart comparison"""
+# NEW GPT Vision Routes (Job-based with HTTP Polling)
+@app.post("/api/gpt-upload")
+async def gpt_upload_image(file: UploadFile = File(...)):
+    """Upload image for GPT Vision analysis (job-based)"""
     if not GPT_VISION_AVAILABLE:
         raise HTTPException(status_code=400, detail="GPT Vision analysis not available")
-    
-    logger.info(f"Starting GPT comparison for: {file.filename}")
     
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Save uploaded file to temp folder with unique name
-    file_id = str(uuid.uuid4())
-    temp_filename = f"{file_id}.png"
-    temp_file_path = os.path.join(TEMP_DIR, temp_filename)
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
     
-    with open(temp_file_path, "wb") as buffer:
+    # Create job directory
+    job_dir = UPLOAD_DIR / job_id
+    job_dir.mkdir(exist_ok=True)
+    
+    # Save uploaded file
+    file_path = job_dir / file.filename
+    with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
+    # Create job entry
+    jobs[job_id] = {
+        "id": job_id,
+        "status": "uploaded",
+        "filename": file.filename,
+        "file_path": str(file_path),
+        "created_at": time.time(),
+        "results": None,
+        "progress": 0,
+        "analysis_type": "gpt_vision"
+    }
+    
+    return {
+        "job_id": job_id,
+        "filename": file.filename,
+        "status": "uploaded",
+        "analysis_type": "gpt_vision"
+    }
+
+@app.post("/api/gpt-analyze/{job_id}")
+async def gpt_analyze_image(job_id: str, background_tasks: BackgroundTasks):
+    """Start GPT Vision analysis in background"""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if not GPT_VISION_AVAILABLE:
+        raise HTTPException(status_code=400, detail="GPT Vision analysis not available")
+    
+    # Update job status
+    jobs[job_id]["status"] = "processing"
+    jobs[job_id]["progress"] = 0
+    
+    # Run analysis in background
+    background_tasks.add_task(run_gpt_vision_analysis, job_id)
+    
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "analysis_type": "gpt_vision"
+    }
+
+def run_gpt_vision_analysis(job_id: str):
+    """Run GPT Vision analysis in background"""
     try:
-        await send_gpt_progress_update(5, 100, "Validating image...", 0)
+        file_path = jobs[job_id]["file_path"]
         
-        if not validate_image(temp_file_path):
-            raise HTTPException(status_code=400, detail="Invalid image file")
+        logger.info(f"Starting GPT comparison for job: {job_id}")
         
-        await send_gpt_progress_update(10, 100, "Processing image...", 0)
-        query_b64 = encode_image_base64(temp_file_path)
+        # Update progress
+        jobs[job_id]["progress"] = 5
         
-        await send_gpt_progress_update(15, 100, "Scanning historical charts...", 0)
+        if not validate_image(file_path):
+            raise Exception("Invalid image file")
+        
+        jobs[job_id]["progress"] = 10
+        query_b64 = encode_image_base64(file_path)
+        
+        jobs[job_id]["progress"] = 15
         
         if not os.path.exists(HISTORICAL_DIR):
-            raise HTTPException(status_code=404, detail="Historical data folder not found")
+            raise Exception("Historical data folder not found")
         
         historical_files = [f for f in os.listdir(HISTORICAL_DIR) if f.endswith(('.png', '.jpg', '.jpeg'))]
         
         if not historical_files:
-            raise HTTPException(status_code=404, detail="No historical data found")
+            raise Exception("No historical data found")
         
         total_files = len(historical_files)
         logger.info(f"Found {total_files} historical files")
         
-        await send_gpt_progress_update(20, 100, f"Found {total_files} charts", 0)
+        jobs[job_id]["progress"] = 20
         
         results = []
-        completed = 0
         
         for index, file_name in enumerate(historical_files):
             year = os.path.splitext(file_name)[0]
             historical_path = os.path.join(HISTORICAL_DIR, file_name)
             
+            # Update progress (20% to 90%)
             progress = 20 + int((index / total_files) * 70)
-            
-            await send_gpt_progress_update(progress, 100, f"Comparing with {year}...", completed)
+            jobs[job_id]["progress"] = progress
             
             try:
                 historical_b64 = encode_image_base64(historical_path)
                 prompt = generate_prompt(year)
-                
-                await send_gpt_progress_update(progress + 2, 100, f"AI analyzing {year}...", completed)
                 
                 response = client.chat.completions.create(
                     model="gpt-4o",
@@ -459,16 +462,123 @@ async def gpt_compare_charts(file: UploadFile = File(...)):
                     "historical_image_url": f"/historical/{file_name}"
                 })
                 
-                completed += 1
                 logger.info(f"Completed {year}: {score}/100")
-                
-                await send_gpt_progress_update(progress + 5, 100, f"Completed {year} ({score}/100)", completed)
                 
             except Exception as e:
                 logger.error(f"Error with {year}: {str(e)}")
                 continue
         
-        await send_gpt_progress_update(92, 100, "Sorting results...", completed)
+        jobs[job_id]["progress"] = 92
+        
+        # Sort results
+        results = sorted([r for r in results if r["score"] is not None], 
+                        key=lambda x: x["score"], reverse=True)
+        
+        top_matches = results[:5]
+        
+        # Copy uploaded file to temp for frontend access
+        temp_filename = f"{job_id}.png"
+        temp_file_path = os.path.join(TEMP_DIR, temp_filename)
+        shutil.copy2(file_path, temp_file_path)
+        
+        final_results = {
+            "results": results,
+            "top_matches": top_matches,
+            "current_image_url": f"/temp/{temp_filename}",
+            "analysis_type": "gpt_vision"
+        }
+        
+        # Update job with results
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["results"] = final_results
+        jobs[job_id]["progress"] = 100
+        
+        logger.info(f"GPT analysis completed! Best match: {top_matches[0]['year']} ({top_matches[0]['score']}/100)")
+        
+    except Exception as e:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(e)
+        logger.error(f"Error processing GPT job {job_id}: {str(e)}")
+
+# OLD GPT Vision Route (keep for backward compatibility)
+@app.post("/api/gpt-compare", response_model=ComparisonResponse)
+async def gpt_compare_charts(file: UploadFile = File(...)):
+    """GPT Vision chart comparison (old WebSocket version - kept for compatibility)"""
+    if not GPT_VISION_AVAILABLE:
+        raise HTTPException(status_code=400, detail="GPT Vision analysis not available")
+    
+    logger.info(f"Starting GPT comparison for: {file.filename}")
+    
+    if not file.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    
+    # Save uploaded file to temp folder with unique name
+    file_id = str(uuid.uuid4())
+    temp_filename = f"{file_id}.png"
+    temp_file_path = os.path.join(TEMP_DIR, temp_filename)
+    
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    try:
+        if not validate_image(temp_file_path):
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        query_b64 = encode_image_base64(temp_file_path)
+        
+        if not os.path.exists(HISTORICAL_DIR):
+            raise HTTPException(status_code=404, detail="Historical data folder not found")
+        
+        historical_files = [f for f in os.listdir(HISTORICAL_DIR) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        
+        if not historical_files:
+            raise HTTPException(status_code=404, detail="No historical data found")
+        
+        total_files = len(historical_files)
+        logger.info(f"Found {total_files} historical files")
+        
+        results = []
+        
+        for index, file_name in enumerate(historical_files):
+            year = os.path.splitext(file_name)[0]
+            historical_path = os.path.join(HISTORICAL_DIR, file_name)
+            
+            try:
+                historical_b64 = encode_image_base64(historical_path)
+                prompt = generate_prompt(year)
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are a financial chart analyst."},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{query_b64}"}},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{historical_b64}"}}
+                            ]
+                        }
+                    ],
+                    max_tokens=1000
+                )
+                
+                reply = response.choices[0].message.content
+                match = re.search(r'(\d{1,3})\s*/?\s*100', reply)
+                score = int(match.group(1)) if match else 0
+                
+                results.append({
+                    "year": year,
+                    "score": score,
+                    "analysis": format_analysis_text(reply),
+                    "historical_image_url": f"/historical/{file_name}"
+                })
+                
+                logger.info(f"Completed {year}: {score}/100")
+                
+            except Exception as e:
+                logger.error(f"Error with {year}: {str(e)}")
+                continue
         
         results = sorted([r for r in results if r["score"] is not None], 
                         key=lambda x: x["score"], reverse=True)
@@ -476,8 +586,6 @@ async def gpt_compare_charts(file: UploadFile = File(...)):
         top_matches = results[:5]
         
         logger.info(f"GPT analysis completed! Best match: {top_matches[0]['year']} ({top_matches[0]['score']}/100)")
-        
-        await send_gpt_progress_update(100, 100, f"Complete! Best: {top_matches[0]['year']}", completed)
         
         return ComparisonResponse(
             results=results, 
@@ -754,16 +862,6 @@ async def get_admin_stats():
             "gpt_vision_available": GPT_VISION_AVAILABLE
         }
     }
-
-# WebSocket for GPT Vision progress
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
 
 @app.on_event("startup")
 async def startup_event():
