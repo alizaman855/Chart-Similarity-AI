@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Test</title>
+</head>
+<body>
+    <h1>Status Test</h1>
+    <div id="status">Loading...</div>
+    <div id="cv-dot" style="width: 20px; height: 20px; background: red; display: inline-block; margin: 10px;"></div>
+    <span>Computer Vision</span><br>
+    <div id="gpt-dot" style="width: 20px; height: 20px; background: red; display: inline-block; margin: 10px;"></div>
+    <span>GPT Vision</span><br>
+    <div id="count">Historical Charts: 0</div>
+
+    <script>
+        console.log('Debug page loaded');
+        
+        async function testAPI() {
+            try {
+                console.log('Testing API...');
+                const response = await fetch('http://localhost:5000/api/system-status');
+                console.log('Response:', response);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('Data received:', data);
+                    
+                    document.getElementById('status').innerHTML = 'API Working! ' + JSON.stringify(data);
+                    
+                    // Update dots
+                    if (data.computer_vision_available) {
+                        document.getElementById('cv-dot').style.background = 'green';
+                    }
+                    if (data.gpt_vision_available) {
+                        document.getElementById('gpt-dot').style.background = 'green';
+                    }
+                    
+                    document.getElementById('count').innerHTML = `Historical Charts: ${data.historical_charts_count}`;
+                } else {
+                    document.getElementById('status').innerHTML = 'API Error: ' + response.status;
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('status').innerHTML = 'Connection Error: ' + error.message;
+            }
+        }
+        
+        // Test on page load
+        window.addEventListener('DOMContentLoaded', testAPI);
+    </script>
+</body>
+</html>

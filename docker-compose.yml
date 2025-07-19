@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  chart-analysis:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      # Persistent data volumes
+      - ./data/uploads:/app/uploads
+      - ./data/results:/app/results
+      - ./data/historical:/app/historical
+      - ./data/temp:/app/temp
+      # Mount static files if you want to modify them
+      - ./static:/app/static
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  uploads:
+  results:
+  historical:
+  temp:

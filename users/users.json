@@ -1,0 +1,20 @@
+{
+  "users": {
+    "6076c247-1082-4a75-a518-0e71f9bd8342": {
+      "id": "6076c247-1082-4a75-a518-0e71f9bd8342",
+      "email": "admin@chartanalysis.com",
+      "password_hash": "$2b$12$tsEiq9PDU6k54ArygJB7DOSNx7RTod7.tcZqJtuW5KH/UsZLZsFfK",
+      "role": "admin",
+      "created_at": "2025-07-16T18:11:11.407696",
+      "is_active": true
+    },
+    "47a7339b-e42c-44e9-8ea0-fdf278069e03": {
+      "id": "47a7339b-e42c-44e9-8ea0-fdf278069e03",
+      "email": "mzamanali637@gmail.com",
+      "password_hash": "$2b$12$eApT/MEBM3KojjzTJ.YKfuCkDJ.Xpnplc0XyzulPO6UboJ1wFB15m",
+      "role": "user",
+      "created_at": "2025-07-16T18:12:07.505414",
+      "is_active": true
+    }
+  }
+}
