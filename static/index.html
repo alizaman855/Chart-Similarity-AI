@@ -834,7 +834,6 @@
                 count: 0 
             },
             isProcessing: false,
-            websocket: null,
             pollingInterval: null
         };
 
@@ -844,9 +843,6 @@
             
             // Setup events first
             setupEvents();
-            
-            // Initialize WebSocket connection
-            initializeWebSocket();
             
             // Load system status with retry
             setTimeout(() => {
@@ -858,80 +854,6 @@
                 loadJobs();
             }, 200);
         });
-
-        // Initialize WebSocket for GPT Vision progress
-        function initializeWebSocket() {
-            console.log('🔌 Initializing WebSocket connection...');
-            
-            try {
-                const wsUrl = `ws://localhost:5000/ws`;
-                state.websocket = new WebSocket(wsUrl);
-                
-                state.websocket.onopen = function(event) {
-                    console.log('✅ WebSocket connected');
-                };
-                
-                state.websocket.onmessage = function(event) {
-                    try {
-                        const data = JSON.parse(event.data);
-                        console.log('📨 WebSocket message received:', data);
-                        
-                        if (data.type === 'progress') {
-                            updateGPTProgress(data.percentage, data.message, data.completed_comparisons);
-                        }
-                    } catch (error) {
-                        console.error('❌ WebSocket message parse error:', error);
-                    }
-                };
-                
-                state.websocket.onclose = function(event) {
-                    console.log('🔌 WebSocket disconnected');
-                    // Attempt to reconnect after 3 seconds
-                    setTimeout(() => {
-                        if (!state.websocket || state.websocket.readyState === WebSocket.CLOSED) {
-                            console.log('🔄 Attempting to reconnect WebSocket...');
-                            initializeWebSocket();
-                        }
-                    }, 3000);
-                };
-                
-                state.websocket.onerror = function(error) {
-                    console.error('❌ WebSocket error:', error);
-                };
-                
-            } catch (error) {
-                console.error('❌ WebSocket initialization error:', error);
-            }
-        }
-
-        // Update GPT Vision progress
-        function updateGPTProgress(percentage, message, completed) {
-            console.log('📊 Updating GPT Progress:', percentage, message, completed);
-            
-            const progressFill = document.getElementById('gpt-progress-fill');
-            const progressText = document.getElementById('gpt-progress-text');
-            const progressPercent = document.getElementById('gpt-progress-percent');
-            
-            if (progressFill) {
-                progressFill.style.width = `${percentage}%`;
-            }
-            
-            if (progressText) {
-                progressText.textContent = message || 'Processing...';
-            }
-            
-            if (progressPercent) {
-                progressPercent.textContent = `${percentage}%`;
-            }
-            
-            // Show completed comparisons if available
-            if (completed !== undefined && completed !== null) {
-                const progressText = document.getElementById('gpt-progress-text');
-                if (progressText) {
-                    progressText.textContent = `${message} (${completed} completed)`;
-                }
-            }
-        }
 
         // Enhanced system status loading with better error handling
         async function loadSystemStatus() {
@@ -1473,52 +1395,40 @@
             startPolling();
         }
 
-        // Enhanced uploadGPT function with proper state management
+        // NEW: Enhanced uploadGPT function using job-based system
         async function uploadGPT() {
             console.log('🧠 Starting GPT upload...');
             
             const formData = new FormData();
             formData.append('file', state.file);
             
-            const response = await fetch(`${API_BASE}/api/gpt-compare`, {
+            // Step 1: Upload file and create job
+            const uploadResponse = await fetch(`${API_BASE}/api/gpt-upload`, {
                 method: 'POST',
                 body: formData
             });
             
-            if (!response.ok) throw new Error('Analysis failed');
+            if (!uploadResponse.ok) throw new Error('Upload failed');
             
-            const data = await response.json();
-            console.log('✅ GPT analysis complete');
+            const uploadData = await uploadResponse.json();
+            state.jobId = uploadData.job_id;
+            console.log('✅ GPT upload successful, job ID:', state.jobId);
             
-            // The progress is now handled by WebSocket, so we just wait and display results
-            setTimeout(() => {
-                const progressEl = document.getElementById('gpt-progress');
-                if (progressEl) progressEl.classList.add('hidden');
-                
-                // Reset processing state
-                state.isProcessing = false;
-                
-                // Re-enable UI
-                enableUI();
-                
-                // Reset button
-                const btn = document.getElementById('gpt-upload-btn');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fas fa-magic"></i> Analyze with GPT';
-                    btn.style.opacity = '1';
-                }
-                
-                displayGPTResults(data);
-                loadJobs();
-            }, 2000);
+            // Step 2: Start analysis
+            const analyzeResponse = await fetch(`${API_BASE}/api/gpt-analyze/${state.jobId}`, {
+                method: 'POST'
+            });
+            
+            if (!analyzeResponse.ok) throw new Error('Analysis failed');
+            
+            // Step 3: Start polling for progress (same as CV)
+            startPolling();
         }
 
-        // Enhanced polling for CV results with proper state management
+        // Enhanced polling for both CV and GPT results
         function startPolling() {
             console.log('🔄 Starting polling for job:', state.jobId);
             
-            // Clear any existing polling interval
             if (state.pollingInterval) {
                 clearInterval(state.pollingInterval);
             }
@@ -1531,82 +1441,82 @@
                     const data = await response.json();
                     const progress = data.progress || 0;
                     
-                    const progressFill = document.getElementById('cv-progress-fill');
-                    const progressPercent = document.getElementById('cv-progress-percent');
-                    const progressText = document.getElementById('cv-progress-text');
+                    // Update progress bar (works for both CV and GPT)
+                    const analysisType = data.analysis_type || 'computer_vision';
+                    const progressType = analysisType === 'gpt_vision' ? 'gpt' : 'cv';
+                    
+                    const progressFill = document.getElementById(`${progressType}-progress-fill`);
+                    const progressPercent = document.getElementById(`${progressType}-progress-percent`);
+                    const progressText = document.getElementById(`${progressType}-progress-text`);
                     
                     if (progressFill) progressFill.style.width = `${progress}%`;
                     if (progressPercent) progressPercent.textContent = `${progress}%`;
                     if (progressText) progressText.textContent = `Processing... ${progress}%`;
+                    
+                    console.log(`📊 Progress updated: ${progress}% for ${analysisType}`);
                     
                     if (data.status === 'completed') {
                         clearInterval(state.pollingInterval);
                         state.pollingInterval = null;
                         
                         // Hide progress
-                        const progressContainer = document.getElementById('cv-progress');
+                        const progressContainer = document.getElementById(`${progressType}-progress`);
                         if (progressContainer) progressContainer.classList.add('hidden');
                         
                         // Reset processing state
                         state.isProcessing = false;
-                        
-                        // Re-enable UI
                         enableUI();
                         
                         // Reset button
-                        const uploadBtn = document.getElementById('cv-upload-btn');
+                        const uploadBtn = document.getElementById(`${progressType}-upload-btn`);
                         if (uploadBtn) {
                             uploadBtn.disabled = false;
-                            uploadBtn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload & Analyze';
+                            uploadBtn.innerHTML = progressType === 'gpt' ? 
+                                '<i class="fas fa-magic"></i> Analyze with GPT' :
+                                '<i class="fas fa-cloud-upload-alt"></i> Upload & Analyze';
                             uploadBtn.style.opacity = '1';
                         }
                         
-                        displayCVResults(data.results);
+                        // Display results based on analysis type
+                        if (data.analysis_type === 'gpt_vision') {
+                            displayGPTResults(data.results);
+                        } else {
+                            displayCVResults(data.results);
+                        }
+                        
                         loadJobs();
-                        console.log('✅ CV analysis completed');
+                        console.log('✅ Analysis completed');
                         
                     } else if (data.status === 'failed') {
                         clearInterval(state.pollingInterval);
                         state.pollingInterval = null;
                         
-                        // Hide progress
-                        const progressContainer = document.getElementById('cv-progress');
+                        const progressContainer = document.getElementById(`${progressType}-progress`);
                         if (progressContainer) progressContainer.classList.add('hidden');
                         
-                        // Reset processing state
                         state.isProcessing = false;
-                        
-                        // Re-enable UI
                         enableUI();
                         
-                        // Reset button
-                        const uploadBtn = document.getElementById('cv-upload-btn');
+                        const uploadBtn = document.getElementById(`${progressType}-upload-btn`);
                         if (uploadBtn) {
                             uploadBtn.disabled = false;
-                            uploadBtn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload & Analyze';
+                            uploadBtn.innerHTML = progressType === 'gpt' ? 
+                                '<i class="fas fa-magic"></i> Analyze with GPT' :
+                                '<i class="fas fa-cloud-upload-alt"></i> Upload & Analyze';
                             uploadBtn.style.opacity = '1';
                         }
                         
                         showAlert(`Analysis failed: ${data.error || 'Unknown error'}`, 'error');
-                        console.error('❌ CV analysis failed:', data.error);
+                        console.error('❌ Analysis failed:', data.error);
                     }
                 } catch (error) {
                     console.error('❌ Polling error:', error);
                     
-                    // If polling fails multiple times, reset state
                     if (state.pollingInterval) {
                         clearInterval(state.pollingInterval);
                         state.pollingInterval = null;
                         state.isProcessing = false;
                         enableUI();
-                        
-                        const uploadBtn = document.getElementById('cv-upload-btn');
-                        if (uploadBtn) {
-                            uploadBtn.disabled = false;
-                            uploadBtn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload & Analyze';
-                            uploadBtn.style.opacity = '1';
-                        }
-                        
                         showAlert('Connection error. Please try again.', 'error');
                     }
                 }
